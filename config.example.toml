@@ -1,0 +1,14 @@
+# Copy to config.toml for local development. No hardware actions run yet.
+[socket]
+# Explicit development path for macOS. On the Pi, omit this key to use
+# $XDG_RUNTIME_DIR/hubctl.sock in the graphical user's private runtime directory.
+path = "/tmp/hubctl-dev.sock"
+
+[display]
+# Example only: verify the actual output name with wlr-randr on the Pi.
+output = "HDMI-A-1"
+
+[browser]
+# Chromium Ctrl+1 through Ctrl+8 select a numbered tab; Ctrl+9 selects the last.
+active_tab = 1
+screensaver_tab = 2

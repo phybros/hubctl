@@ -1,0 +1,16 @@
+# Build and test outputs.
+/bin/
+/hubctl
+*.test
+/coverage.out
+/coverage.html
+
+# Local configuration and credentials. Keep config.example.toml tracked.
+/config.toml
+.env
+.env.*
+!.env.example
+/mqtt.env
+
+# macOS metadata.
+.DS_Store
