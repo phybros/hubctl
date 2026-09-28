@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"hubctl/internal/browser"
 	"hubctl/internal/config"
 	"hubctl/internal/daemon"
 	"hubctl/internal/ipc"
@@ -21,6 +22,7 @@ var version = "dev"
 
 const usage = `Usage:
   hubctl daemon [--config PATH]
+  hubctl browser launch [--config PATH]
   hubctl config check [--config PATH]
   hubctl status [--config PATH] [--json]
   hubctl active|screensaver|display-off [--config PATH]
@@ -60,6 +62,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	case "config":
 		if len(args) == 0 || args[0] != "check" {
 			return fmt.Errorf("expected: hubctl config check [--config PATH]")
+		}
+		args = args[1:]
+	case "browser":
+		if len(args) == 0 || args[0] != "launch" {
+			return fmt.Errorf("expected: hubctl browser launch [--config PATH]")
 		}
 		args = args[1:]
 	case "daemon", "status", "active", "screensaver", "display-off":
@@ -116,6 +123,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if command == "config" {
 		fmt.Fprintln(stdout, "Configuration valid:", *path)
 		return nil
+	}
+	if command == "browser" {
+		return browser.Launch(ctx, cfg.Browser, stderr)
 	}
 	if command == "settings" {
 		request := ipc.Request{Version: ipc.ProtocolVersion, Command: "status"}

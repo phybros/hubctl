@@ -126,6 +126,8 @@ type Display struct {
 	Output string `toml:"output"`
 }
 type Browser struct {
+	Executable     string `toml:"executable"`
+	UserDataDir    string `toml:"user_data_dir"`
 	Endpoint       string `toml:"endpoint"`
 	ActiveTab      string `toml:"active_tab"`
 	ScreensaverTab string `toml:"screensaver_tab"`
@@ -186,6 +188,12 @@ func Decode(r io.Reader, runtimeDir string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if strings.ContainsRune(c.Browser.Executable, '\x00') || (c.Browser.Executable != "" && strings.TrimSpace(c.Browser.Executable) == "") {
+		return fmt.Errorf("browser.executable must name an executable, not a shell command")
+	}
+	if p := c.Browser.UserDataDir; p != "" && (!filepath.IsAbs(p) || strings.ContainsRune(p, '\x00') || filepath.Clean(p) == "/") {
+		return fmt.Errorf("browser.user_data_dir must be an absolute profile directory")
+	}
 	if c.Settings.Path != "" && (!filepath.IsAbs(c.Settings.Path) || strings.ContainsRune(c.Settings.Path, '\x00') || filepath.Clean(c.Settings.Path) == "/") {
 		return fmt.Errorf("settings.path must be an absolute file path")
 	}

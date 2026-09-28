@@ -38,11 +38,14 @@ path = "/tmp/hubctl-dev.sock"
 output = "HDMI-A-1"
 
 [browser]
+# Optional launcher settings; existing configs work without these.
+# executable = "chromium"
+# user_data_dir = "/home/panel/.config/hubctl-chromium"
 endpoint = "http://127.0.0.1:9222"
 active_tab = "home"
 screensaver_tab = "slideshow"
 
-# Open these URLs manually in Chromium; order doesn't matter.
+# hubctl browser launch opens these URLs in order.
 # URLs match the same origin and path subtree, ignoring queries and fragments.
 [[browser.tabs]]
 name = "home"

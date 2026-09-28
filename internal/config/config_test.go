@@ -26,6 +26,22 @@ func TestWakeDelayConfig(t *testing.T) {
 	}
 }
 
+func TestBrowserLauncherConfig(t *testing.T) {
+	base := "[display]\noutput='HDMI-A-1'\n[browser]\n"
+	c, err := Decode(strings.NewReader(base+"executable='/usr/bin/chromium'\nuser_data_dir='/home/panel/kiosk'"), "/run/user/1000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Browser.Executable != "/usr/bin/chromium" || c.Browser.UserDataDir != "/home/panel/kiosk" {
+		t.Fatal(c.Browser)
+	}
+	for _, bad := range []string{"user_data_dir='~/kiosk'", "user_data_dir='relative'", "user_data_dir='/'", "executable='   '"} {
+		if _, err := Decode(strings.NewReader(base+bad), "/run/user/1000"); err == nil {
+			t.Fatal(bad)
+		}
+	}
+}
+
 func TestPolicyConfig(t *testing.T) {
 	base := "[display]\noutput='HDMI-A-1'\n[input]\ndevice='/dev/input/by-id/touch'\n[policy]\nenabled=true\n"
 	c, err := Decode(strings.NewReader(base), "/run/user/1000")

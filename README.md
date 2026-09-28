@@ -8,8 +8,9 @@ macOS; the target is Raspberry Pi OS 64-bit with labwc and Chromium.
 The executable loads and validates TOML configuration and supports clean daemon
 shutdown on SIGINT and SIGTERM. It serves status over a Unix socket with `0600`
 permissions. On Linux, it controls display output with `wlr-randr` and Chromium tab
-selection through Chromium's local DevTools HTTP interface. It does not launch
-Chromium yet. Optional MQTT control and Home Assistant discovery are available.
+selection through Chromium's local DevTools HTTP interface. A separate
+`hubctl browser launch` command starts Chromium; the daemon does not supervise it.
+Optional MQTT control and Home Assistant discovery are available.
 `wtype` is no longer required.
 
 ## Development
@@ -146,19 +147,51 @@ Start the daemon in that desktop terminal, as the logged-in user, without sudo:
 ./hubctl daemon --config ./config.toml
 ```
 
-Launch Chromium manually with the configured pages in any order. With the previous
-kiosk instance closed, launch from another desktop terminal:
+With the previous kiosk instance closed, launch Chromium from another desktop
+terminal (ideally before starting the daemon):
 
 ```sh
-chromium --kiosk --noerrdialogs --no-first-run \
-  --user-data-dir="$HOME/.config/hubctl-chromium" \
-  --remote-debugging-address=127.0.0.1 \
-  --remote-debugging-port=9222 \
-  http://homeassistant.local https://www.google.com
+./hubctl browser launch --config ./config.toml
 ```
 
 The dedicated profile is reused across launches and preserves logins. An already
 running browser using that profile must be restarted to change its startup flags.
+
+The launcher opens every `[[browser.tabs]]` URL in config order. It uses `chromium`
+from PATH, kiosk mode, `--no-first-run`, `--noerrdialogs`, and a loopback DevTools
+port taken from `browser.endpoint`. Launch requires an endpoint of
+`http://127.0.0.1:PORT`; other loopback addresses remain supported for controlling
+an independently launched browser, but not for this launcher.
+
+It always adds `--password-store=basic` to avoid the desktop keyring unlock prompt.
+**This removes keyring protection for saved passwords**; Chromium describes it
+as its plain-text password store. Use a dedicated, low-privilege HA account and
+protect access to the Pi/profile. Existing keyring-encrypted credentials may need
+to be entered again. See [Chromium's password-storage documentation](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/linux/password_storage.md).
+
+Existing configs need no changes. Optional keys in `[browser]` are:
+
+```toml
+executable = "chromium" # executable name on PATH or absolute path, not a shell command
+user_data_dir = "/home/panel/.config/hubctl-chromium"
+```
+
+The default profile is always `$HOME/.config/hubctl-chromium`, matching the original
+manual command (even if XDG_CONFIG_HOME is set). A new directory is created with
+0700 permissions; existing profile contents are preserved. Paths in TOML must be
+absolute; `~` and environment variables are not expanded. Do not use your normal
+desktop browser's profile for remote debugging.
+
+Launch runs only on Linux in the Wayland desktop session, without sudo. It replaces
+the launcher process with Chromium, inheriting the terminal and environment, so
+browser output, signals, and exit status pass through directly. It does not start
+the daemon, reconnect to its socket, automatically restart Chromium, or install
+systemd units. Closing Chromium leaves the independently running daemon alone.
+
+An occupied DevTools port stops launch with a message instead of knowingly opening
+duplicate tabs in an existing browser. Profile locking and stale-lock recovery are
+left to Chromium: hubctl neither rejects nor deletes its Singleton files and does
+not kill another browser. Chromium also handles races between simultaneous launches.
 
 From SSH as the same user, use the same config file to run:
 
