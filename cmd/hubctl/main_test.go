@@ -46,6 +46,7 @@ func TestCommands(t *testing.T) {
 }
 
 func TestConfigCheckAndDaemonShutdown(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("WAYLAND_DISPLAY", "") // Never use a real desktop when running tests on Linux.
 	path := filepath.Join(t.TempDir(), "config.toml")
 	socketDir, err := os.MkdirTemp("/tmp", "hubctl-cli-")
@@ -96,6 +97,22 @@ func TestConfigCheckAndDaemonShutdown(t *testing.T) {
 	}
 	if !strings.Contains(statusOutput.String(), "Daemon: running") {
 		t.Fatal(statusOutput.String())
+	}
+	for _, args := range [][]string{{"settings", "set", "day_idle", "10m"}, {"settings", "list"}, {"settings", "reset", "day_idle"}, {"settings", "reset", "all"}} {
+		statusOutput.Reset()
+		if err := run(ctx, append(args, "--config", path), &statusOutput, &statusOutput); err != nil {
+			t.Fatal(err)
+		}
+		want := "day_idle: 5m [config"
+		if args[1] == "set" || args[1] == "list" {
+			want = "day_idle: 10m [override"
+		}
+		if !strings.Contains(statusOutput.String(), want) {
+			t.Fatal(statusOutput.String())
+		}
+	}
+	if err := run(ctx, []string{"settings", "set", "night_start", "07:00", "--config", path}, &statusOutput, &statusOutput); err == nil {
+		t.Fatal("invalid schedule accepted through socket")
 	}
 	for _, mode := range []string{"active", "screensaver", "display-off"} {
 		statusOutput.Reset()

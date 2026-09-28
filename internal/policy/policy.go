@@ -129,6 +129,41 @@ func (e *Engine) Tick(ctx context.Context) error {
 		return err
 	}
 	defer func() { <-e.gate }()
+	return e.tick(ctx)
+}
+
+// Configure commits durable settings while holding the same gate as commands
+// and timer decisions. Hardware errors after acceptance remain in policy status.
+func (e *Engine) Configure(ctx context.Context, cfg config.Policy, commit func() error) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := e.enter(ctx); err != nil {
+		return err
+	}
+	defer func() { <-e.gate }()
+	if err := commit(); err != nil {
+		return err
+	}
+	e.dayIdle, _ = time.ParseDuration(cfg.DayIdle)
+	e.nightIdle, _ = time.ParseDuration(cfg.NightIdle)
+	start, _ := time.Parse("15:04", cfg.NightStart)
+	end, _ := time.Parse("15:04", cfg.NightEnd)
+	e.start, e.end = start.Hour()*60+start.Minute(), end.Hour()*60+end.Minute()
+	// Recompute pending idle decisions against the new durations, without
+	// discarding elapsed activity or a pending schedule boundary.
+	e.mu.Lock()
+	if e.pendingIdle {
+		e.status.PendingMode = ""
+		e.pendingIdle = false
+		e.retryAt = time.Time{}
+	}
+	e.mu.Unlock()
+	_ = e.tick(ctx)
+	return nil
+}
+
+func (e *Engine) tick(ctx context.Context) error {
 	now := e.now()
 	touch := e.activity()
 	panel := e.panel.Snapshot()

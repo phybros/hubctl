@@ -51,6 +51,72 @@ func tick(t *testing.T, e *Engine) {
 	}
 }
 
+func TestRuntimeConfiguration(t *testing.T) {
+	e, p, touch, now := setup(t, "2026-09-26T12:00:00Z")
+	tick(t, e)
+	*now = now.Add(4 * time.Minute)
+	cfg := config.DefaultPolicy()
+	cfg.DayIdle = "3m"
+	if err := e.Configure(context.Background(), cfg, func() error { return errors.New("disk full") }); err == nil {
+		t.Fatal("commit failure ignored")
+	}
+	tick(t, e)
+	if p.mode != controller.Active {
+		t.Fatal("failed commit changed timeout")
+	}
+	if err := e.Configure(context.Background(), cfg, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if p.mode != controller.Screensaver {
+		t.Fatal("shorter timeout lost elapsed idle")
+	}
+	// Moving into night behaves like a normal boundary, including touch safety.
+	cfg.NightStart, cfg.NightEnd = "11:00", "13:00"
+	touch.TouchDown = true
+	if err := e.Configure(context.Background(), cfg, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if p.mode != controller.Screensaver || e.Snapshot().PendingMode != controller.DisplayOff {
+		t.Fatal(e.Snapshot())
+	}
+	touch.TouchDown = false
+	tick(t, e)
+	if p.mode != controller.DisplayOff {
+		t.Fatal(p.mode)
+	}
+	cfg.NightStart, cfg.NightEnd = "22:00", "07:00"
+	if err := e.Configure(context.Background(), cfg, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if p.mode != controller.Active {
+		t.Fatal("schedule edit did not enter day")
+	}
+}
+
+func TestLongerTimeoutCancelsIdleRetry(t *testing.T) {
+	e, p, _, now := setup(t, "2026-09-26T12:00:00Z")
+	tick(t, e)
+	*now = now.Add(5 * time.Minute)
+	p.fail = true
+	if err := e.Tick(context.Background()); err == nil {
+		t.Fatal("expected hardware failure")
+	}
+	p.fail = false
+	cfg := config.DefaultPolicy()
+	cfg.DayIdle = "10m"
+	if err := e.Configure(context.Background(), cfg, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if p.mode != controller.Active || e.Snapshot().PendingMode != "" {
+		t.Fatal(e.Snapshot())
+	}
+	*now = now.Add(5 * time.Minute)
+	tick(t, e)
+	if p.mode != controller.Screensaver {
+		t.Fatal("elapsed idle was reset")
+	}
+}
+
 func TestDayIdleAndActivity(t *testing.T) {
 	e, p, touch, now := setup(t, "2026-09-26T12:00:00Z")
 	tick(t, e)

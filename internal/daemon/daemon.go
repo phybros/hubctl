@@ -13,7 +13,9 @@ import (
 	"hubctl/internal/controller"
 	"hubctl/internal/input"
 	"hubctl/internal/ipc"
+	"hubctl/internal/mqtt"
 	"hubctl/internal/policy"
+	"hubctl/internal/settings"
 )
 
 // Run serves local control requests until cancellation.
@@ -26,6 +28,11 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		return err
 	}
 	defer server.Close()
+	preferences, err := settings.Open(cfg.Settings.Path, cfg.Policy)
+	if err != nil {
+		return fmt.Errorf("load runtime settings: %w", err)
+	}
+	cfg.Policy = preferences.Policy()
 	started := time.Now()
 	display, browser, hardwareErr := hardware(cfg)
 	control := controller.New(display, browser)
@@ -53,6 +60,7 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 				return err
 			}
 			actions = automation
+			preferences.Bind(automation.Configure)
 		}
 		inputCtx, cancel := context.WithCancel(ctx)
 		var workers sync.WaitGroup
@@ -105,8 +113,10 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		logger.Warn("hardware control unavailable", "reason", hardwareErr)
 	}
 	logger.Info("daemon started", "socket_path", cfg.Socket.Path, "display_output", cfg.Display.Output, "hardware_control", control.Available())
-	err = server.Serve(ctx, func() ipc.Status {
+	snapshot := func() ipc.Status {
 		status := ipc.Status{State: control.Snapshot(), Version: version, UptimeSeconds: time.Since(started).Seconds(), HardwareControl: control.Available()}
+		prefs := preferences.Snapshot()
+		status.Settings = &prefs
 		if automation != nil {
 			state := automation.Snapshot()
 			status.Policy = &state
@@ -117,6 +127,26 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 		}
 		if hardwareErr != nil {
 			status.HardwareError = hardwareErr.Error()
+		}
+		return status
+	}
+	var bridge *mqtt.Service
+	if cfg.MQTT.Enabled {
+		bridge = mqtt.New(cfg.MQTT, version, actions.Apply, func() mqtt.Report {
+			state := snapshot()
+			return mqtt.Report{Mode: state.AppliedMode, Diagnostic: state}
+		}, logger)
+		bridge.SetSettings(preferences)
+		mqttCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); bridge.Run(mqttCtx) }()
+		defer func() { cancel(); <-done }()
+	}
+	err = server.Serve(ctx, func() ipc.Status {
+		status := snapshot()
+		if bridge != nil {
+			state := bridge.Snapshot()
+			status.MQTT = &state
 		}
 		return status
 	}, func(ctx context.Context, command string) *ipc.Error {
@@ -133,6 +163,11 @@ func Run(ctx context.Context, cfg config.Config, version string, logger *slog.Lo
 			}
 			logger.Warn("mode command failed", "mode", command, "error", err)
 			return &ipc.Error{Code: code, Message: err.Error()}
+		}
+		return nil
+	}, func(ctx context.Context, request ipc.Request) *ipc.Error {
+		if err := preferences.Change(ctx, request.Name, request.Value, request.Command == "settings.reset"); err != nil {
+			return &ipc.Error{Code: "settings_failed", Message: err.Error()}
 		}
 		return nil
 	})

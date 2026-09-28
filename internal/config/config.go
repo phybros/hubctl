@@ -15,11 +15,57 @@ import (
 )
 
 type Config struct {
-	Socket  Socket  `toml:"socket"`
-	Display Display `toml:"display"`
-	Browser Browser `toml:"browser"`
-	Input   Input   `toml:"input"`
-	Policy  Policy  `toml:"policy"`
+	Socket   Socket   `toml:"socket"`
+	Display  Display  `toml:"display"`
+	Browser  Browser  `toml:"browser"`
+	Input    Input    `toml:"input"`
+	Policy   Policy   `toml:"policy"`
+	MQTT     MQTT     `toml:"mqtt"`
+	Settings Settings `toml:"settings"`
+}
+
+type Settings struct {
+	Path string `toml:"path"`
+}
+
+type MQTT struct {
+	Enabled         bool   `toml:"enabled"`
+	Broker          string `toml:"broker"`
+	DeviceID        string `toml:"device_id"`
+	DeviceName      string `toml:"device_name"`
+	TopicPrefix     string `toml:"topic_prefix"`
+	DiscoveryPrefix string `toml:"discovery_prefix"`
+	BirthTopic      string `toml:"birth_topic"`
+}
+
+func DefaultMQTT() MQTT {
+	return MQTT{Broker: "tcp://127.0.0.1:1883", DeviceID: "kitchen_hub", DeviceName: "Kitchen Hub", TopicPrefix: "hub/kitchen", DiscoveryPrefix: "homeassistant", BirthTopic: "homeassistant/status"}
+}
+func (m MQTT) Validate() error {
+	u, err := url.Parse(m.Broker)
+	if err != nil || (u.Scheme != "tcp" && u.Scheme != "ssl") || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("mqtt.broker must be tcp://host:port or ssl://host:port, without embedded credentials")
+	}
+	if m.DeviceID == "" {
+		return fmt.Errorf("mqtt.device_id must not be empty")
+	}
+	for _, r := range m.DeviceID {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return fmt.Errorf("mqtt.device_id must use letters, digits, underscores, or hyphens")
+		}
+	}
+	if strings.TrimSpace(m.DeviceName) == "" {
+		return fmt.Errorf("mqtt.device_name must not be empty")
+	}
+	for _, topic := range []string{m.TopicPrefix, m.DiscoveryPrefix, m.BirthTopic} {
+		if topic == "" || strings.ContainsAny(topic, "+#\x00\r\n") || strings.Trim(topic, "/ ") != topic {
+			return fmt.Errorf("MQTT topics/prefixes must be nonempty without wildcards or surrounding slashes/spaces")
+		}
+	}
+	if m.BirthTopic == m.TopicPrefix+"/mode/set" || strings.HasPrefix(m.BirthTopic, m.TopicPrefix+"/settings/") {
+		return fmt.Errorf("mqtt.birth_topic must differ from the command topic")
+	}
+	return nil
 }
 
 type Policy struct {
@@ -120,7 +166,7 @@ func Load(path string) (Config, error) {
 // Decode defaults the socket under the graphical session's runtime directory.
 // Without that directory (for example on macOS), an explicit path is required.
 func Decode(r io.Reader, runtimeDir string) (Config, error) {
-	c := Config{Browser: DefaultBrowser(), Policy: DefaultPolicy()}
+	c := Config{Browser: DefaultBrowser(), Policy: DefaultPolicy(), MQTT: DefaultMQTT()}
 	if runtimeDir != "" {
 		c.Socket.Path = filepath.Join(runtimeDir, "hubctl.sock")
 	}
@@ -130,6 +176,9 @@ func Decode(r io.Reader, runtimeDir string) (Config, error) {
 	if err := c.Policy.Validate(); err != nil {
 		return Config{}, err
 	}
+	if err := c.MQTT.Validate(); err != nil {
+		return Config{}, err
+	}
 	if err := c.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -137,6 +186,14 @@ func Decode(r io.Reader, runtimeDir string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.Settings.Path != "" && (!filepath.IsAbs(c.Settings.Path) || strings.ContainsRune(c.Settings.Path, '\x00') || filepath.Clean(c.Settings.Path) == "/") {
+		return fmt.Errorf("settings.path must be an absolute file path")
+	}
+	if c.MQTT.Enabled {
+		if err := c.MQTT.Validate(); err != nil {
+			return err
+		}
+	}
 	if c.Policy.Enabled {
 		if err := c.Policy.Validate(); err != nil {
 			return err

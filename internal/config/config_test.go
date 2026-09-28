@@ -45,6 +45,22 @@ func TestPolicyConfig(t *testing.T) {
 	}
 }
 
+func TestMQTTConfig(t *testing.T) {
+	base := "[display]\noutput='HDMI-A-1'\n[mqtt]\nenabled=true\n"
+	c, err := Decode(strings.NewReader(base), "/run/user/1000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MQTT.DeviceID != "kitchen_hub" || c.MQTT.TopicPrefix != "hub/kitchen" {
+		t.Fatalf("defaults: %+v", c.MQTT)
+	}
+	for _, bad := range []string{"broker='http://broker'", "broker='tcp://user:secret@broker:1883'", "device_id='bad/id'", "topic_prefix='hub/+'", "discovery_prefix=''", "birth_topic='hub/kitchen/mode/set'", "device_name=''"} {
+		if _, err := Decode(strings.NewReader(base+bad), "/run/user/1000"); err == nil {
+			t.Fatalf("accepted %s", bad)
+		}
+	}
+}
+
 func TestDecodeDefaults(t *testing.T) {
 	c, err := Decode(strings.NewReader("[display]\noutput = 'HDMI-A-1'\n"), "/run/user/1000")
 	if err != nil {

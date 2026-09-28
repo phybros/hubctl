@@ -13,6 +13,21 @@ night_start = "22:00"
 night_end = "07:00"
 timezone = "Local" # Pi's timezone, or e.g. "America/Toronto"
 
+[settings]
+# Optional absolute path for persistent runtime overrides. Default:
+# $XDG_STATE_HOME/hubctl/settings.json, or ~/.local/state/hubctl/settings.json.
+# path = "/home/panel/.local/state/hubctl/settings.json"
+
+[mqtt]
+enabled = false
+broker = "tcp://127.0.0.1:1883" # Replace with your LAN broker; ssl:// for TLS.
+device_id = "kitchen_hub" # Unique and stable per panel.
+device_name = "Kitchen Hub"
+topic_prefix = "hub/kitchen"
+discovery_prefix = "homeassistant"
+birth_topic = "homeassistant/status"
+# Credentials: HUB_MQTT_USERNAME and HUB_MQTT_PASSWORD environment variables.
+
 [socket]
 # Explicit development path for macOS. On the Pi, omit this key to use
 # $XDG_RUNTIME_DIR/hubctl.sock in the graphical user's private runtime directory.

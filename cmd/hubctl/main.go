@@ -14,6 +14,7 @@ import (
 	"hubctl/internal/config"
 	"hubctl/internal/daemon"
 	"hubctl/internal/ipc"
+	"hubctl/internal/settings"
 )
 
 var version = "dev"
@@ -23,6 +24,9 @@ const usage = `Usage:
   hubctl config check [--config PATH]
   hubctl status [--config PATH] [--json]
   hubctl active|screensaver|display-off [--config PATH]
+  hubctl settings list [--config PATH] [--json]
+  hubctl settings set NAME VALUE [--config PATH]
+  hubctl settings reset NAME|all [--config PATH]
   hubctl version
 `
 
@@ -42,6 +46,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	command := args[0]
 	args = args[1:]
+	var settingAction, settingName, settingValue string
 	switch command {
 	case "help", "--help", "-h":
 		fmt.Fprint(stdout, usage)
@@ -58,6 +63,26 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		args = args[1:]
 	case "daemon", "status", "active", "screensaver", "display-off":
+	case "settings":
+		if len(args) == 0 {
+			return fmt.Errorf("expected settings list, set NAME VALUE, or reset NAME|all")
+		}
+		settingAction, args = args[0], args[1:]
+		switch settingAction {
+		case "list":
+		case "set":
+			if len(args) < 2 {
+				return fmt.Errorf("expected settings set NAME VALUE")
+			}
+			settingName, settingValue, args = args[0], args[1], args[2:]
+		case "reset":
+			if len(args) < 1 {
+				return fmt.Errorf("expected settings reset NAME|all")
+			}
+			settingName, args = args[0], args[1:]
+		default:
+			return fmt.Errorf("unknown settings action %q", settingAction)
+		}
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
@@ -65,7 +90,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	path := flags.String("config", "", "configuration file (default: user config directory/hubctl/config.toml)")
 	var asJSON bool
-	if command == "status" {
+	if command == "status" || command == "settings" {
 		flags.BoolVar(&asJSON, "json", false, "print machine-readable status")
 	}
 	if err := flags.Parse(args); err != nil {
@@ -91,6 +116,25 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if command == "config" {
 		fmt.Fprintln(stdout, "Configuration valid:", *path)
 		return nil
+	}
+	if command == "settings" {
+		request := ipc.Request{Version: ipc.ProtocolVersion, Command: "status"}
+		if settingAction != "list" {
+			request.Command = "settings." + settingAction
+			request.Name = settingName
+			request.Value = settingValue
+		}
+		status, err := ipc.Send(ctx, cfg.Socket.Path, request)
+		if err != nil {
+			return err
+		}
+		if status.Settings == nil {
+			return fmt.Errorf("daemon does not expose runtime settings; update and restart it")
+		}
+		if asJSON {
+			return json.NewEncoder(stdout).Encode(status.Settings)
+		}
+		return printSettings(stdout, status.Settings)
 	}
 	if command == "status" {
 		status, err := ipc.GetStatus(ctx, cfg.Socket.Path)
@@ -122,6 +166,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 				_, err = fmt.Fprintln(stdout, "Policy error:", status.Policy.LastError)
 			}
 		}
+		if err == nil && status.MQTT != nil {
+			_, err = fmt.Fprintf(stdout, "MQTT: connected=%t\n", status.MQTT.Connected)
+			if err == nil && status.MQTT.LastError != "" {
+				_, err = fmt.Fprintln(stdout, "MQTT error:", status.MQTT.LastError)
+			}
+			if err == nil && status.MQTT.LastCommandError != "" {
+				_, err = fmt.Fprintln(stdout, "MQTT command error:", status.MQTT.LastCommandError)
+			}
+		}
+		if err == nil && status.Settings != nil {
+			err = printSettings(stdout, status.Settings)
+		}
 		return err
 	}
 	if command != "daemon" {
@@ -133,4 +189,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	return daemon.Run(ctx, cfg, version, slog.New(slog.NewTextHandler(stderr, nil)))
+}
+
+func printSettings(w io.Writer, snapshot *settings.Snapshot) error {
+	if _, err := fmt.Fprintf(w, "Settings: %s (policy enabled=%t)\n", snapshot.Path, snapshot.PolicyEnabled); err != nil {
+		return err
+	}
+	for _, name := range settings.Names {
+		v := snapshot.Values[name]
+		if _, err := fmt.Fprintf(w, "  %s: %s [%s; default=%s]\n", name, v.Value, v.Source, v.Default); err != nil {
+			return err
+		}
+	}
+	return nil
 }

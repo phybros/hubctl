@@ -9,7 +9,8 @@ The executable loads and validates TOML configuration and supports clean daemon
 shutdown on SIGINT and SIGTERM. It serves status over a Unix socket with `0600`
 permissions. On Linux, it controls display output with `wlr-randr` and Chromium tab
 selection through Chromium's local DevTools HTTP interface. It does not launch
-Chromium or connect to MQTT yet. `wtype` is no longer required.
+Chromium yet. Optional MQTT control and Home Assistant discovery are available.
+`wtype` is no longer required.
 
 ## Development
 
@@ -177,7 +178,7 @@ tab switching on the real panel.
 
 The command syntax follows the upstream [wlr-randr source](https://github.com/emersion/wlr-randr/blob/master/main.c)
 and Chromium's DevTools `/json/list` and `/json/activate/{id}` endpoints.
-MQTT will feed the same controller in a later slice.
+MQTT commands also feed the shared controller and local policy.
 
 ## Touch-to-wake
 
@@ -282,3 +283,160 @@ To test without waiting five minutes, temporarily set `day_idle = "15s"` and
 night hours surrounding the current local time to test nighttime startup and wake,
 then place an upcoming boundary a minute ahead to check scheduled transitions.
 Restore the intended timings and restart afterward.
+
+## MQTT and Home Assistant
+
+MQTT is disabled by default. Add a top-level section using your actual broker:
+
+```toml
+[mqtt]
+enabled = true
+broker = "tcp://mqtt.local:1883"
+device_id = "kitchen_hub"
+device_name = "Kitchen Hub"
+topic_prefix = "hub/kitchen"
+discovery_prefix = "homeassistant"
+birth_topic = "homeassistant/status"
+```
+
+Use unique, stable device IDs and topic prefixes for multiple panels. The client ID
+is `hubctl-<device_id>`. `ssl://broker:8883` enables TLS with certificate verification
+against system trust roots; plain `tcp://` does not encrypt credentials or traffic.
+Custom CA files and client certificates are not configured in this version.
+
+Credentials come exclusively from `HUB_MQTT_USERNAME` and `HUB_MQTT_PASSWORD` in the
+daemon's environment. For manual startup, optionally keep these exports in
+`~/mqtt.env`, protect it with `chmod 600 ~/mqtt.env`, then source it in the GUI
+terminal before starting the daemon:
+
+```sh
+# Contents of ~/mqtt.env (replace the placeholders):
+export HUB_MQTT_USERNAME='panel-user'
+export HUB_MQTT_PASSWORD='your-broker-password'
+```
+
+```sh
+. ~/mqtt.env
+~/hubctl daemon --config ~/config.toml
+```
+
+Do not put credentials in the broker URL or TOML. Leave the environment variables
+unset for a broker that allows unauthenticated access.
+
+With the example prefix, the bridge uses:
+
+| Topic | Behavior |
+| --- | --- |
+| `hub/kitchen/mode/set` | Accepts `active`, `screensaver`, or `display-off` |
+| `hub/kitchen/mode/state` | Retained applied mode; `None` means unknown to HA |
+| `hub/kitchen/status` | Retained diagnostic JSON, including controller/input/policy status |
+| `hub/kitchen/availability` | Retained `online`/`offline`, with an offline Last Will |
+| `homeassistant/select/kitchen_hub/mode/config` | Retained Home Assistant discovery |
+
+Home Assistant's MQTT integration must already be configured for the same broker.
+The Kitchen Hub device will expose a Mode selector. It is not optimistic: a failed
+transition is not reported as successful. Discovery and state are republished on
+reconnection and on `online` received at the configured HA birth topic. The select
+uses [Home Assistant's MQTT Select schema](https://www.home-assistant.io/integrations/select.mqtt/).
+
+State and diagnostics refresh once per second, including changes caused by touch,
+CLI commands, and local scheduling. MQTT mode commands behave like CLI commands:
+they reset idle timing and do not permanently override the day/night schedule.
+Send commands without retain; retained commands replayed on subscription are
+ignored. MQTT 3.1.1 may deliver live retained publications without marking them as
+retained to existing subscribers, so publishing retained commands is unsupported.
+QoS 1 can redeliver messages; repeated mode commands reapply and reset idle time.
+
+Connections retry every five seconds. MQTT runs independently of local control:
+broker outages do not suspend touch, schedules, or the CLI. The command queue is
+bounded, and queued commands from a lost connection are discarded. Connection
+state/errors appear in `hubctl status`; command failures appear in the daemon log
+and controller diagnostics. On shutdown, the bridge attempts to publish offline;
+on unexpected disconnection the broker publishes the Last Will after detecting it.
+
+For manual verification, use Home Assistant's MQTT publish/listen tools to send
+`screensaver` to `hub/kitchen/mode/set` (retain off), watch state change, then use
+touch to wake and verify state returns to active. Test broker restart and HA restart;
+the mode selector and current state should recover without restarting hubctl.
+
+## Runtime settings
+
+Four policy preferences can be changed without restarting the daemon:
+`day_idle`, `night_idle`, `night_start`, and `night_end`. Home Assistant discovers
+two MQTT Number controls (idle timeouts in seconds) and two MQTT Text controls
+(night start/end in strict 24-hour `HH:MM` format), under the device's configuration
+entities. These use the [MQTT Number](https://www.home-assistant.io/integrations/number.mqtt/)
+and [MQTT Text](https://www.home-assistant.io/integrations/text.mqtt/) schemas.
+The duration boxes normally cover 0.001–86400 seconds; discovery expands the upper
+bound if the effective value is already larger. CLI/TOML accept any positive Go
+duration. Night start and end must differ. Both times use `policy.timezone`.
+
+The same settings are available locally:
+
+```sh
+~/hubctl settings list --config ~/config.toml
+~/hubctl settings set day_idle 10m --config ~/config.toml
+~/hubctl settings set night_start 23:00 --config ~/config.toml
+~/hubctl settings reset day_idle --config ~/config.toml
+~/hubctl settings reset all --config ~/config.toml
+```
+
+`settings list --json` and `status --json` expose each setting's effective value,
+TOML default, and source (`config` or `override`). Human-readable status shows
+these too. Flags go after the setting name/value. Settings commands require the
+daemon to be running.
+
+TOML remains the installation configuration and supplies defaults. Edits made
+through MQTT or the CLI are saved as overrides in
+`$XDG_STATE_HOME/hubctl/settings.json`, falling back to
+`~/.local/state/hubctl/settings.json`. An optional `[settings] path` selects a
+different absolute file path. Use a separate file for each daemon instance.
+The file is created on the first change, with mode 0600; updates sync a temporary
+file and atomically rename it. TOML is never rewritten. Invalid edits and failed
+writes leave both the existing overrides and live policy unchanged.
+
+Overrides survive restarts and broker outages. Editing a TOML default does not
+replace an override: reset that setting to return to the default loaded at daemon
+startup. Restart to reload TOML edits. Resetting `all` removes overrides together;
+this is useful if an individual schedule reset would make start and end equal.
+A malformed or incompatible override file stops startup with an error instead of
+silently discarding preferences. Back up/move it aside while the daemon is stopped
+to recover with TOML defaults. `config check` checks TOML only, not runtime state.
+
+Behavior on accepted changes:
+
+- Idle timeout changes preserve elapsed idle time. Shortening a timeout can cause
+  an immediate idle transition; lengthening it cancels a pending idle retry.
+- Schedule changes re-evaluate the current period immediately. Crossing into
+  night requests display-off; crossing into day requests active. Touch safety
+  still applies. Changes that stay in the same period do not reset idle time.
+- Hardware transition failures do not undo a saved setting: policy status records
+  the error and the existing retry mechanism handles the transition.
+- When `policy.enabled = false`, settings can still be saved, but no automation
+  runs. Enable policy in TOML and restart when ready.
+- Wake delay, timezone, policy enablement, browser configuration, broker settings,
+  and hardware settings remain TOML-only in this release.
+
+With the example topic prefix:
+
+| Topic | Payload |
+| --- | --- |
+| `hub/kitchen/settings/day_idle/set` | Numeric seconds, e.g. `600` |
+| `hub/kitchen/settings/night_idle/set` | Numeric seconds, e.g. `120` |
+| `hub/kitchen/settings/night_start/set` | `HH:MM`, e.g. `22:00` |
+| `hub/kitchen/settings/night_end/set` | `HH:MM`, e.g. `07:00` |
+| `hub/kitchen/settings/NAME/reset` | `RESET`; NAME is a setting name or `all` |
+| `hub/kitchen/settings/NAME/state` | Retained confirmed value (seconds or `HH:MM`) |
+
+All commands must be published without retain. Controls are non-optimistic and
+show confirmed settings; rejected commands leave the old state in place. Errors
+are logged and the most recent processed MQTT command error is exposed in
+`status.mqtt.last_command_error` (cleared by the next successful command).
+The retained diagnostic status includes settings values, defaults, and sources.
+Duplicate identical settings commands are no-ops. Discovery and current values
+are republished on broker reconnect and HA birth, never restored from retained
+command messages. Reset is currently available through CLI/MQTT, not an HA button.
+
+To test: change Day idle timeout to `600` in HA, confirm an override with
+`settings list`, restart the daemon, and check it remains `600`. Reset `day_idle`
+through the CLI and verify HA returns to the TOML default (normally `300`).

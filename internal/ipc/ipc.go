@@ -14,7 +14,9 @@ import (
 
 	"hubctl/internal/controller"
 	"hubctl/internal/input"
+	"hubctl/internal/mqtt"
 	"hubctl/internal/policy"
+	"hubctl/internal/settings"
 )
 
 const ProtocolVersion = 1
@@ -24,11 +26,15 @@ const maxFrame = 16 * 1024
 type Request struct {
 	Version int    `json:"version"`
 	Command string `json:"command"`
+	Name    string `json:"name,omitempty"`
+	Value   string `json:"value,omitempty"`
 }
 
 type Status struct {
-	Policy *policy.Status `json:"policy,omitempty"`
-	Input  *input.Status  `json:"input,omitempty"`
+	Settings *settings.Snapshot `json:"settings,omitempty"`
+	MQTT     *mqtt.Status       `json:"mqtt,omitempty"`
+	Policy   *policy.Status     `json:"policy,omitempty"`
+	Input    *input.Status      `json:"input,omitempty"`
 	controller.State
 	Version         string  `json:"version"`
 	UptimeSeconds   float64 `json:"uptime_seconds"`
@@ -87,7 +93,7 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-func (s *Server) Serve(ctx context.Context, status func() Status, command func(context.Context, string) *Error) error {
+func (s *Server) Serve(ctx context.Context, status func() Status, command func(context.Context, string) *Error, settingHandlers ...func(context.Context, Request) *Error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(ctx, func() { s.Close() })
@@ -124,12 +130,16 @@ func (s *Server) Serve(ctx context.Context, status func() Status, command func(c
 				response.Error = &Error{Code: "invalid_request", Message: "expected a newline-terminated JSON request"}
 			} else if request.Version != ProtocolVersion {
 				response.Error = &Error{Code: "unsupported_version", Message: "expected protocol version 1"}
-			} else if request.Command != "status" && (!controller.Mode(request.Command).Valid() || command == nil) {
+			} else if request.Command != "status" && !(len(settingHandlers) > 0 && (request.Command == "settings.set" || request.Command == "settings.reset")) && (!controller.Mode(request.Command).Valid() || command == nil) {
 				response.Error = &Error{Code: "unknown_command", Message: "unknown command"}
 			} else {
 				if request.Command != "status" {
 					requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-					response.Error = command(requestCtx, request.Command)
+					if request.Command == "settings.set" || request.Command == "settings.reset" {
+						response.Error = settingHandlers[0](requestCtx, request)
+					} else {
+						response.Error = command(requestCtx, request.Command)
+					}
 					cancel()
 				}
 				value := status()
@@ -153,6 +163,11 @@ func GetStatus(ctx context.Context, path string) (Status, error) {
 }
 
 func Execute(ctx context.Context, path, command string) (Status, error) {
+	return Send(ctx, path, Request{Version: ProtocolVersion, Command: command})
+}
+
+func Send(ctx context.Context, path string, request Request) (Status, error) {
+	command := request.Command
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
@@ -164,7 +179,7 @@ func Execute(ctx context.Context, path, command string) (Status, error) {
 	defer stop()
 	deadline, _ := ctx.Deadline()
 	conn.SetDeadline(deadline)
-	if err := json.NewEncoder(conn).Encode(Request{Version: ProtocolVersion, Command: command}); err != nil {
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		return Status{}, fmt.Errorf("send %s request: %w", command, err)
 	}
 	var response Response
