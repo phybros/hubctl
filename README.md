@@ -7,7 +7,9 @@ macOS; the target is Raspberry Pi OS 64-bit with labwc and Chromium.
 
 The executable loads and validates TOML configuration and supports clean daemon
 shutdown on SIGINT and SIGTERM. It serves status over a Unix socket with `0600`
-permissions. It does **not** yet control hardware, launch Chromium, or connect to MQTT.
+permissions. On Linux, it controls display output with `wlr-randr` and Chromium tab
+selection through Chromium's local DevTools HTTP interface. It does not launch
+Chromium or connect to MQTT yet. `wtype` is no longer required.
 
 ## Development
 
@@ -30,7 +32,8 @@ configuration directory: `$XDG_CONFIG_HOME` or `~/.config` on Linux, and
 `~/Library/Application Support` on macOS. A missing file is an error.
 
 Unknown keys, invalid tab mappings, missing display output, and nonabsolute socket
-paths are rejected. Tab mappings default to 1 and 2. The socket defaults to
+paths are rejected. Browser defaults are the named `home` and `slideshow` tabs
+shown in the example config. The socket defaults to
 `$XDG_RUNTIME_DIR/hubctl.sock`; without that environment variable, supply a path.
 Paths are literal: environment variables and `~` are not expanded in TOML.
 Configuration checking validates values only, not hardware availability or path
@@ -50,10 +53,14 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/hubctl-linux-arm64 ./cmd/h
 ./bin/hubctl display-off --config ./config.example.toml
 ```
 
-These commands now reach the shared controller, but the daemon has no hardware
-adapters yet: they return `hardware_unavailable` and exit unsuccessfully. Successful
-transitions are exercised with fake adapters in tests; the daemon never simulates
-hardware success.
+On Linux display commands execute `wlr-randr` directly, without a shell; browser
+commands list and activate DevTools targets over local HTTP.
+The daemon inherits its Wayland environment; it does not assume `wayland-0`.
+On macOS, or when the Linux session environment/tools are missing, commands return
+`hardware_unavailable`. Status includes a `hardware_error` explaining why. Restart
+the daemon after installing missing tools or correcting its environment.
+`hardware_control: true` means the adapters are available, not that hardware has
+been verified. Tool failures and bounded command output are included in errors.
 
 The controller starts with requested/applied modes `unknown` and leaves hardware
 untouched. Active and screensaver turn the display on before selecting the browser
@@ -81,5 +88,197 @@ directory on the Pi. Clean shutdown removes the socket. Startup refuses to repla
 any existing path, including a stale socket left by a crash. If this occurs, verify
 that no daemon is running before manually removing that specific stale socket.
 
-Display/browser adapters and hardware validation are next. MQTT, touch, and timers
-will feed the same controller in later slices.
+## Manual Pi test
+
+Copy `bin/hubctl-linux-arm64` to the Pi as `hubctl` and make it executable with
+`chmod +x ./hubctl`. No Go installation is needed on the Pi. In a terminal opened
+from the Pi's Wayland desktop, install the tools and identify the output:
+
+```sh
+sudo apt install wlr-randr
+wlr-randr
+```
+
+Create `config.toml` with the actual output name (the value below is an example):
+
+```toml
+[display]
+output = "HDMI-A-1"
+
+[browser]
+endpoint = "http://127.0.0.1:9222"
+active_tab = "home"
+screensaver_tab = "slideshow"
+
+[[browser.tabs]]
+name = "home"
+url = "http://homeassistant.local"
+
+[[browser.tabs]]
+name = "slideshow"
+url = "https://www.google.com"
+```
+
+Tabs are a configurable array with unique names and URLs. The mode mappings refer
+to names, not numeric positions. You can add more named tabs; currently only the
+active and screensaver mappings are selectable by mode commands. A supplied tabs
+array replaces the defaults. Old numeric `active_tab`/`screensaver_tab` settings
+must be replaced with names when upgrading.
+
+Each command discovers current target IDs, so tab reordering and Chromium restarts
+do not invalidate saved IDs. Matching requires the same scheme and host (including
+an explicit port, if present), and the configured path or a descendant path.
+Queries and fragments are ignored. For example, the Home Assistant root URL also
+matches `/lovelace/0`. `/photos` matches `/photos/album` but not `/photos-other`.
+Use distinct paths for apps on the same host; avoid overlapping configured paths.
+If a site redirects to a different host, configure its final URL. Missing or
+multiple matching page targets are errors. The daemon does not create, navigate,
+or close tabs; open the configured pages yourself.
+
+The endpoint must use an HTTP loopback IP address. Requests do not follow redirects
+or use HTTP proxies. Keep Chromium's debugging listener bound to loopback.
+
+Omitting `[socket]` uses the graphical user's `$XDG_RUNTIME_DIR/hubctl.sock`.
+Start the daemon in that desktop terminal, as the logged-in user, without sudo:
+
+```sh
+./hubctl daemon --config ./config.toml
+```
+
+Launch Chromium manually with the configured pages in any order. With the previous
+kiosk instance closed, launch from another desktop terminal:
+
+```sh
+chromium --kiosk --noerrdialogs --no-first-run \
+  --user-data-dir="$HOME/.config/hubctl-chromium" \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9222 \
+  http://homeassistant.local https://www.google.com
+```
+
+The dedicated profile is reused across launches and preserves logins. An already
+running browser using that profile must be restarted to change its startup flags.
+
+From SSH as the same user, use the same config file to run:
+
+```sh
+./hubctl status --config ./config.toml
+./hubctl screensaver --config ./config.toml
+./hubctl active --config ./config.toml
+./hubctl display-off --config ./config.toml
+./hubctl active --config ./config.toml
+```
+
+If SSH lacks `XDG_RUNTIME_DIR`, set `[socket].path` in the config to the absolute
+socket path logged by the daemon. The CLI does not need Wayland access.
+No keyboard focus or shortcuts are needed for tab activation. Keep SSH available
+to turn the output back on while validating touch wake. Validate display wake and
+tab switching on the real panel.
+
+The command syntax follows the upstream [wlr-randr source](https://github.com/emersion/wlr-randr/blob/master/main.c)
+and Chromium's DevTools `/json/list` and `/json/activate/{id}` endpoints.
+MQTT will feed the same controller in a later slice.
+
+## Touch-to-wake
+
+On Linux arm64/amd64, enable touch monitoring by adding this top-level table
+(adjust the device path for your touchscreen):
+
+```toml
+[input]
+device = "/dev/input/by-id/usb-wch.cn_TouchScreen_9LQ0172005164-event-if00"
+wake_delay = "4s"
+```
+
+Use the stable `by-id` path, not an `eventN` number. The desktop user must be able
+to read the device. Do not run the daemon as root. If configured input cannot be
+opened or lacks aggregate `BTN_TOUCH` contact reporting, startup fails explicitly.
+Omit `[input]` on macOS or to disable monitoring. Stop `evtest --grab` before testing.
+
+Before entering screensaver or display-off, hubctl exclusively grabs the input
+device. Grab failure rejects the transition before changing hardware. A finger
+already on the active screen also rejects the transition: lift it and retry.
+The first new touch requests active through the shared controller. Input remains
+grabbed until activation succeeds and all fingers are lifted, including when
+active was requested manually. A failed activation keeps capture; lift and touch
+again to retry, or use the CLI. Repeated movement does not keep issuing commands.
+While active, touch is passively observed and normal gestures reach Chromium.
+
+`hubctl status` reports whether input is grabbed and a contact is down. JSON status
+also includes the last activity time. Timestamp-only frames are not activity.
+Kernel event overruns are resynchronized before allowing release. Device read or
+release errors appear in input status and block further transitions; correct the
+problem and restart the daemon. Automatic hotplug recovery is not implemented.
+
+Capture is owned by the running process. Shutdown/crash releases it, and unplugging
+the device removes it; protection does not persist across daemon restarts. Restore
+active before stopping the daemon when practical. Other touch interfaces/devices
+are not captured: verify your chosen interface blocks all Chromium touch input
+using `evtest --grab`, as was verified for this panel.
+
+Manual acceptance test after copying the rebuilt binary and restarting:
+
+1. Set `screensaver`, then tap: Home Assistant should appear without receiving the tap.
+2. Set `display-off`, wait for the monitor to power down, then tap to wake.
+3. Hold a finger down while waking: status should remain grabbed until it lifts.
+4. Try two fingers; releasing only one must not release capture.
+5. Verify subsequent taps and scrolling work normally in Home Assistant.
+
+The software verifies successful display/browser commands, not physical monitor
+readiness; the monitor can still take additional time to illuminate after wake.
+Set `input.wake_delay = "4s"` to keep input captured during that interval. The
+countdown begins after a successful transition turns the output back on following
+display-off; release requires both expiry and all fingers lifted. Additional
+touches and repeated active commands do not restart the countdown. Manual active
+commands receive the same protection. Ordinary screensaver-to-active transitions
+have no delay; going from off through screensaver still preserves the countdown.
+Failed wake attempts retain capture and start the countdown only on success.
+Omitting the setting or using `"0s"` preserves immediate release after finger-up.
+Commands return without waiting for the delay. Status reports its remaining time.
+
+## Idle and day/night policy
+
+With touch input configured, enable local automation using this top-level table:
+
+```toml
+[policy]
+enabled = true
+day_idle = "5m"
+night_idle = "2m"
+night_start = "22:00"
+night_end = "07:00"
+timezone = "Local"
+```
+
+Automation is disabled when omitted. The durations and hours shown are the defaults.
+`Local` uses the Pi's timezone; set an IANA name such as `America/Toronto` to make it
+explicit. Hours use 24-hour HH:MM format. Night includes its start and excludes its
+end; intervals may cross midnight. Equal start/end times and nonpositive idle
+durations are rejected. The schedule is evaluated locally and requires no HA/MQTT.
+
+When enabled, startup selects active during the day or display-off at night.
+Daytime active becomes screensaver after the day idle timeout. Night start selects
+display-off; touch wakes to active, and night idle returns to display-off. A manually
+selected screensaver at night also expires to display-off. Morning selects active.
+Nighttime wake uses the same active mode, not a separate CLI mode.
+
+Manual commands take effect immediately and reset the idle timer, including
+repeated commands. They supersede pending automatic retries; they are not permanent
+overrides of the schedule. Manually selecting display-off during the day stays off
+until touch/manual wake or a morning boundary. Touch-down, motion, and finger-up
+count as activity. Held fingers and the configured wake delay prevent idle expiry.
+Timestamp-only reports do not reset the timer. Mouse and keyboard activity are not
+monitored. A night boundary encountered during a held gesture waits for finger-up.
+
+The policy checks once per second and uses the existing serialized controller and
+touch capture. Failed automatic transitions retry at five-second intervals; new
+activity cancels stale idle retries. A missing/failed touch monitor suspends
+automatic transitions and is reported in status. Normal wake/input error recovery
+still applies. `hubctl status --json` includes policy period, timezone, idle seconds,
+pending mode, and errors. Status remains available during hardware actions.
+
+To test without waiting five minutes, temporarily set `day_idle = "15s"` and
+`night_idle = "10s"`, restart the daemon, and verify touch resets the timer. Choose
+night hours surrounding the current local time to test nighttime startup and wake,
+then place an upcoming boundary a minute ahead to check scheduled transitions.
+Restore the intended timings and restart afterward.

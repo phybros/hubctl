@@ -31,6 +31,13 @@ type Browser interface {
 	Select(context.Context, Mode) error
 }
 
+// InputGuard coordinates exclusive touch capture with serialized transitions.
+type InputGuard interface {
+	Prepare(Mode) error
+	Complete(Mode, bool) error
+	WakePending() bool
+}
+
 type State struct {
 	RequestedMode Mode   `json:"requested_mode"`
 	AppliedMode   Mode   `json:"applied_mode"`
@@ -44,7 +51,11 @@ type Controller struct {
 	gate    chan struct{}
 	mu      sync.RWMutex
 	state   State
+	input   InputGuard
 }
+
+// SetInput must be called before serving commands.
+func (c *Controller) SetInput(input InputGuard) { c.input = input }
 
 func New(display Display, browser Browser) *Controller {
 	return &Controller{display: display, browser: browser, gate: make(chan struct{}, 1), state: State{RequestedMode: Unknown, AppliedMode: Unknown}}
@@ -56,6 +67,16 @@ func (c *Controller) Snapshot() State { c.mu.RLock(); defer c.mu.RUnlock(); retu
 // Apply serializes transitions while allowing status reads during hardware calls.
 // Queueing counts against the caller's deadline. Repeated modes are reapplied.
 func (c *Controller) Apply(ctx context.Context, mode Mode) error {
+	return c.transition(ctx, mode, false)
+}
+
+// Wake rechecks pending activity after obtaining the transition gate, preventing
+// stale wake events from overriding newer manual commands.
+func (c *Controller) Wake(ctx context.Context) error {
+	return c.transition(ctx, Active, true)
+}
+
+func (c *Controller) transition(ctx context.Context, mode Mode, wake bool) error {
 	if !mode.Valid() {
 		return fmt.Errorf("invalid mode %q", mode)
 	}
@@ -68,6 +89,18 @@ func (c *Controller) Apply(ctx context.Context, mode Mode) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if wake && (c.input == nil || !c.input.WakePending()) {
+		return nil
+	}
+	// Failure to capture must leave both hardware and applied state untouched.
+	if c.input != nil {
+		if err := c.input.Prepare(mode); err != nil {
+			c.mu.Lock()
+			c.state.LastError = "input capture: " + err.Error()
+			c.mu.Unlock()
+			return fmt.Errorf("input capture: %w", err)
+		}
+	}
 	c.mu.Lock()
 	c.state.RequestedMode = mode
 	c.state.Transitioning = true
@@ -77,6 +110,11 @@ func (c *Controller) Apply(ctx context.Context, mode Mode) error {
 	ctx, cancel := context.WithTimeout(ctx, TransitionTimeout)
 	defer cancel()
 	err := c.apply(ctx, mode)
+	if c.input != nil {
+		if inputErr := c.input.Complete(mode, err == nil); inputErr != nil {
+			err = errors.Join(err, fmt.Errorf("input release: %w", inputErr))
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.state.Transitioning = false

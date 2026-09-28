@@ -104,6 +104,24 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err == nil && status.LastError != "" {
 			_, err = fmt.Fprintln(stdout, "Last error:", status.LastError)
 		}
+		if err == nil && status.HardwareError != "" {
+			_, err = fmt.Fprintln(stdout, "Hardware unavailable:", status.HardwareError)
+		}
+		if err == nil && status.Input != nil {
+			if status.Input.WakeDelayRemainingSeconds > 0 {
+				_, err = fmt.Fprintf(stdout, "Wake touch delay: %.1fs remaining\n", status.Input.WakeDelayRemainingSeconds)
+			}
+			_, err = fmt.Fprintf(stdout, "Touch: enabled=%t grabbed=%t down=%t\n", status.Input.Enabled, status.Input.Grabbed, status.Input.TouchDown)
+			if err == nil && status.Input.Error != "" {
+				_, err = fmt.Fprintln(stdout, "Touch error:", status.Input.Error)
+			}
+		}
+		if err == nil && status.Policy != nil {
+			_, err = fmt.Fprintf(stdout, "Policy: %s (%s), idle %.0fs\n", status.Policy.Period, status.Policy.Timezone, status.Policy.IdleSeconds)
+			if err == nil && status.Policy.LastError != "" {
+				_, err = fmt.Fprintln(stdout, "Policy error:", status.Policy.LastError)
+			}
+		}
 		return err
 	}
 	if command != "daemon" {

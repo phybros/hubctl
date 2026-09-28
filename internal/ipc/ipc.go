@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"hubctl/internal/controller"
+	"hubctl/internal/input"
+	"hubctl/internal/policy"
 )
 
 const ProtocolVersion = 1
@@ -25,10 +27,13 @@ type Request struct {
 }
 
 type Status struct {
+	Policy *policy.Status `json:"policy,omitempty"`
+	Input  *input.Status  `json:"input,omitempty"`
 	controller.State
 	Version         string  `json:"version"`
 	UptimeSeconds   float64 `json:"uptime_seconds"`
 	HardwareControl bool    `json:"hardware_control"`
+	HardwareError   string  `json:"hardware_error,omitempty"`
 }
 
 type Error struct {

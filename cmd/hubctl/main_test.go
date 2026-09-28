@@ -46,6 +46,7 @@ func TestCommands(t *testing.T) {
 }
 
 func TestConfigCheckAndDaemonShutdown(t *testing.T) {
+	t.Setenv("WAYLAND_DISPLAY", "") // Never use a real desktop when running tests on Linux.
 	path := filepath.Join(t.TempDir(), "config.toml")
 	socketDir, err := os.MkdirTemp("/tmp", "hubctl-cli-")
 	if err != nil {

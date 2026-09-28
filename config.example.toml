@@ -1,4 +1,18 @@
-# Copy to config.toml for local development. No hardware actions run yet.
+# Copy to config.toml and adjust for your machine. Linux mode commands control hardware.
+# Optional touch-to-wake (Linux). Use the touchscreen's stable by-id path.
+# [input]
+# device = "/dev/input/by-id/usb-wch.cn_TouchScreen_9LQ0172005164-event-if00"
+# wake_delay = "4s"
+
+# Local automation is opt-in and requires input.device above.
+[policy]
+enabled = false
+day_idle = "5m"
+night_idle = "2m"
+night_start = "22:00"
+night_end = "07:00"
+timezone = "Local" # Pi's timezone, or e.g. "America/Toronto"
+
 [socket]
 # Explicit development path for macOS. On the Pi, omit this key to use
 # $XDG_RUNTIME_DIR/hubctl.sock in the graphical user's private runtime directory.
@@ -9,6 +23,16 @@ path = "/tmp/hubctl-dev.sock"
 output = "HDMI-A-1"
 
 [browser]
-# Chromium Ctrl+1 through Ctrl+8 select a numbered tab; Ctrl+9 selects the last.
-active_tab = 1
-screensaver_tab = 2
+endpoint = "http://127.0.0.1:9222"
+active_tab = "home"
+screensaver_tab = "slideshow"
+
+# Open these URLs manually in Chromium; order doesn't matter.
+# URLs match the same origin and path subtree, ignoring queries and fragments.
+[[browser.tabs]]
+name = "home"
+url = "http://homeassistant.local"
+
+[[browser.tabs]]
+name = "slideshow"
+url = "https://www.google.com"
